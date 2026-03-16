@@ -1,0 +1,15 @@
+# Deploy to Render.com (free tier) – connect this repo and Render will use this.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# In Render dashboard → Environment, add:
+#   JWT_SECRET = <long random string, e.g. from: openssl rand -hex 32>
+#
+services:
+  - type: web
+    name: golf-app-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
