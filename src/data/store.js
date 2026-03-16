@@ -188,6 +188,16 @@ export function getResults(game) {
   }));
 }
 
+// User's current in-progress game (if any). For "return to game" when app reopens.
+export function getActiveGameForUser(userId) {
+  for (const game of games.values()) {
+    if (game.status === 'in_progress' && game.playerIds.includes(userId)) {
+      return game;
+    }
+  }
+  return null;
+}
+
 // Match history for a user: games they participated in that are completed
 export function getGamesForUser(userId) {
   const list = [];
