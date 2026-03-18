@@ -21,6 +21,7 @@ const users = new Map();       // id -> { id, email?, displayName?, password?, b
 const games = new Map();       // id -> game
 const gameByCode = new Map();  // code -> gameId (for join by code)
 const passwordResetTokens = new Map(); // token -> { userId, expiresAt }
+const processedStripeEventIds = new Set(); // idempotency for webhook events (in-memory)
 
 // Seed a default user for testing (password: password) — hashed at startup
 let seedUserId = uuidv4();
@@ -99,6 +100,15 @@ export function setUserBalance(userId, amount) {
   if (!u) return null;
   u.balance = amount;
   return u;
+}
+
+// ----- Stripe webhook idempotency (in-memory) -----
+export function hasProcessedStripeEvent(eventId) {
+  return processedStripeEventIds.has(eventId);
+}
+
+export function markStripeEventProcessed(eventId) {
+  processedStripeEventIds.add(eventId);
 }
 
 // ----- Games -----

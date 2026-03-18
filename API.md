@@ -19,6 +19,16 @@
 | POST | `/auth/forgot-password` | `{ email }` | `{ message }` — Same message always (no email enumeration). Backend creates reset token; in production send link via email (see AUTH.md). |
 | POST | `/auth/reset-password` | `{ token, newPassword }` | `{ message }` — Token from forgot-password flow (link or dev log). Single-use, expires in 1 hour. |
 
+### 1b. Deposits (Stripe Checkout)
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| POST | `/api/payments/create-checkout-session` | `{ amount }` | `{ id, url }` — Creates Stripe Checkout session for a deposit. |
+
+Notes:
+- `amount` can be dollars (e.g. `10`) or cents (e.g. `1000` if you pass an integer >= 100).
+- Balance is credited only via the Stripe webhook: `POST /webhooks/stripe`.
+
 Store `token` (e.g. secure store) and send `Authorization: Bearer <token>` on every `/api` request.
 
 ---
