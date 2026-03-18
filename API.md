@@ -9,12 +9,15 @@
 
 ## Endpoints (aligned with Golf Skins frontend)
 
-### 1. Login & guest
+### 1. Sign up, login, guest, forgot password
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
+| POST | `/auth/register` | `{ email, password, displayName? }` | `201` `{ token, user: { id, displayName, email } }` — password min 8 chars; 409 if email exists. |
 | POST | `/auth/login` | `{ email, password }` | `{ token, user: { id, displayName, email } }` |
 | POST | `/auth/guest` | `{ displayName? }` | `{ token, user: { id, displayName } }` |
+| POST | `/auth/forgot-password` | `{ email }` | `{ message }` — Same message always (no email enumeration). Backend creates reset token; in production send link via email (see AUTH.md). |
+| POST | `/auth/reset-password` | `{ token, newPassword }` | `{ message }` — Token from forgot-password flow (link or dev log). Single-use, expires in 1 hour. |
 
 Store `token` (e.g. secure store) and send `Authorization: Bearer <token>` on every `/api` request.
 
@@ -101,7 +104,8 @@ Use GET for lobby (code + players). Use POST start → then navigate to `/match/
 
 ## Frontend integration checklist
 
-- [x] **Auth:** POST `/auth/login` or `/auth/guest` → store token; send `Authorization: Bearer <token>` on `/api` requests.
+- [x] **Auth:** POST `/auth/register` (sign up) or POST `/auth/login` or POST `/auth/guest` → store token; send `Authorization: Bearer <token>` on `/api` requests.
+- [x] **Forgot password:** POST `/auth/forgot-password` with `{ email }`; show “check your email” (or in dev use reset link from server log). Reset page: POST `/auth/reset-password` with `{ token, newPassword }`.
 - [x] **Create game:** POST `/api/games` → get `id` + `code` → navigate to `/lobby?gameId={id}`, show `code`.
 - [x] **Join game:** POST `/api/games/join` with `{ code }` → get `gameId` → navigate to `/lobby?gameId={gameId}`.
 - [x] **Lobby:** GET `/api/games/:gameId` → show code + players; POST `/api/games/:gameId/start` → navigate to `/match/:id`.

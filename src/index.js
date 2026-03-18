@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { optionalAuth } from './middleware/auth.js';
 import { requestLogger } from './middleware/requestLogger.js';
+import { initStore } from './data/store.js';
 import authRoutes from './routes/auth.js';
 import gamesRoutes from './routes/games.js';
 import usersRoutes from './routes/users.js';
@@ -34,6 +35,13 @@ app.use('/api', optionalAuth);
 app.use('/api/games', gamesRoutes);
 app.use('/api/users', usersRoutes);
 
-app.listen(PORT, () => {
-  console.log(`Golf app API running on port ${PORT}`);
+async function start() {
+  await initStore();
+  app.listen(PORT, () => {
+    console.log(`Golf app API running on port ${PORT}`);
+  });
+}
+start().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });

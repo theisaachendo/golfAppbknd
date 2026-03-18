@@ -4,6 +4,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { hashPassword } from '../lib/password.js';
 
 // ----- Helpers -----
 function generateGameCode() {
@@ -19,33 +20,62 @@ function generateGameCode() {
 const users = new Map();       // id -> { id, email?, displayName?, password?, balance, isGuest, createdAt }
 const games = new Map();       // id -> game
 const gameByCode = new Map();  // code -> gameId (for join by code)
+const passwordResetTokens = new Map(); // token -> { userId, expiresAt }
 
-// Seed a default user for testing (password: password)
-const seedUserId = uuidv4();
-users.set(seedUserId, {
-  id: seedUserId,
-  email: 'demo@example.com',
-  displayName: 'Demo User',
-  password: 'password', // In production use bcrypt
-  balance: 100,
-  isGuest: false,
-  createdAt: new Date().toISOString(),
-});
+// Seed a default user for testing (password: password) — hashed at startup
+let seedUserId = uuidv4();
+export async function initStore() {
+  const hashed = await hashPassword('password');
+  users.set(seedUserId, {
+    id: seedUserId,
+    email: 'demo@example.com',
+    displayName: 'Demo User',
+    password: hashed,
+    balance: 100,
+    isGuest: false,
+    createdAt: new Date().toISOString(),
+  });
+}
 
 // ----- User -----
-export function createUser({ email, displayName, password, isGuest = false }) {
+export function createUser({ email, displayName, passwordHash, isGuest = false }) {
   const id = uuidv4();
   const user = {
     id,
     email: isGuest ? undefined : email,
     displayName: displayName || (isGuest ? `Guest ${id.slice(0, 8)}` : undefined),
-    password: isGuest ? undefined : password,
+    password: isGuest ? undefined : passwordHash,
     balance: 0,
     isGuest,
     createdAt: new Date().toISOString(),
   };
   users.set(id, user);
   return user;
+}
+
+export function updateUserPassword(userId, passwordHash) {
+  const u = users.get(userId);
+  if (!u) return null;
+  u.password = passwordHash;
+  return u;
+}
+
+// ----- Password reset tokens (short-lived, single-use) -----
+const RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+
+export function createPasswordResetToken(userId) {
+  const token = uuidv4();
+  const expiresAt = new Date(Date.now() + RESET_TOKEN_EXPIRY_MS).toISOString();
+  passwordResetTokens.set(token, { userId, expiresAt });
+  return { token, expiresAt };
+}
+
+export function getAndConsumePasswordResetToken(token) {
+  const record = passwordResetTokens.get(token);
+  if (!record) return null;
+  passwordResetTokens.delete(token);
+  if (new Date(record.expiresAt) < new Date()) return null;
+  return record.userId;
 }
 
 export function findUserByEmail(email) {
