@@ -7,6 +7,8 @@ import { initStore } from './data/store.js';
 import authRoutes from './routes/auth.js';
 import gamesRoutes from './routes/games.js';
 import usersRoutes from './routes/users.js';
+import paymentsRoutes from './routes/payments.js';
+import stripeWebhookRoutes from './routes/stripeWebhook.js';
 
 dotenv.config();
 
@@ -14,8 +16,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
 app.use(requestLogger);
+
+// Stripe webhooks require the raw body for signature verification.
+app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+// Back-compat / common naming: accept Stripe dashboard destination using this path too.
+app.use('/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+
+app.use(express.json());
 
 // Root: so frontend can hit base URL and get a 200
 app.get('/', (req, res) => {
@@ -34,6 +42,7 @@ app.use('/auth', authRoutes);
 app.use('/api', optionalAuth);
 app.use('/api/games', gamesRoutes);
 app.use('/api/users', usersRoutes);
+app.use('/api/payments', paymentsRoutes);
 
 async function start() {
   await initStore();
