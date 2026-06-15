@@ -28,12 +28,12 @@ router.post('/register', async (req, res) => {
   if (String(password).length < 8) {
     return res.status(400).json({ error: 'Bad request', message: 'password must be at least 8 characters' });
   }
-  if (findUserByEmail(trimmedEmail)) {
+  if (await findUserByEmail(trimmedEmail)) {
     return res.status(409).json({ error: 'Conflict', message: 'An account with this email already exists' });
   }
   try {
     const passwordHash = await hashPassword(password);
-    const user = createUser({
+    const user = await createUser({
       email: trimmedEmail,
       displayName: displayName ? String(displayName).trim() || undefined : undefined,
       passwordHash,
@@ -60,11 +60,11 @@ router.post('/login', async (req, res) => {
   if (!email || !password) {
     return res.status(400).json({ error: 'Bad request', message: 'email and password required' });
   }
-  const user = findUserByEmail(String(email).trim().toLowerCase());
+  const user = await findUserByEmail(String(email).trim().toLowerCase());
   if (!user) {
     return res.status(401).json({ error: 'Unauthorized', message: 'Invalid email or password' });
   }
-  const match = await comparePassword(password, user.password);
+  const match = await comparePassword(password, user.passwordHash);
   if (!match) {
     return res.status(401).json({ error: 'Unauthorized', message: 'Invalid email or password' });
   }
@@ -88,9 +88,9 @@ router.post('/forgot-password', async (req, res) => {
   if (!trimmedEmail) {
     return res.json({ message });
   }
-  const user = findUserByEmail(trimmedEmail);
+  const user = await findUserByEmail(trimmedEmail);
   if (user && !user.isGuest) {
-    const { token } = createPasswordResetToken(user.id);
+    const { token } = await createPasswordResetToken(user.id);
     const baseUrl = process.env.RESET_PASSWORD_BASE_URL || 'https://yourapp.com';
     const resetLink = `${baseUrl.replace(/\/$/, '')}/reset-password?token=${token}`;
     const sent = await sendPasswordResetEmail(trimmedEmail, resetLink);
@@ -110,13 +110,13 @@ router.post('/reset-password', async (req, res) => {
   if (String(newPassword).length < 8) {
     return res.status(400).json({ error: 'Bad request', message: 'password must be at least 8 characters' });
   }
-  const userId = getAndConsumePasswordResetToken(token);
+  const userId = await getAndConsumePasswordResetToken(token);
   if (!userId) {
     return res.status(400).json({ error: 'Bad request', message: 'Invalid or expired reset link. Request a new one.' });
   }
   try {
     const passwordHash = await hashPassword(newPassword);
-    updateUserPassword(userId, passwordHash);
+    await updateUserPassword(userId, passwordHash);
     res.json({ message: 'Password updated. You can now sign in.' });
   } catch (err) {
     console.error('Reset password error:', err);
@@ -125,9 +125,9 @@ router.post('/reset-password', async (req, res) => {
 });
 
 // POST /auth/guest — optional body: { displayName }; returns token + user for guest
-router.post('/guest', (req, res) => {
+router.post('/guest', async (req, res) => {
   const { displayName } = req.body || {};
-  const user = createUser({ isGuest: true, displayName: displayName || undefined });
+  const user = await createUser({ isGuest: true, displayName: displayName || undefined });
   const token = signToken({ userId: user.id });
   res.json({
     token,

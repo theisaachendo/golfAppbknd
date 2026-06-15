@@ -1,0 +1,161 @@
+// Golf Skins — data model.
+//
+// Design note: this is the "no real money yet, money-ready later" schema.
+// - All amounts are stored in INTEGER CENTS (never floats) so adding real
+//   payments later needs no data migration.
+// - A LedgerEntry table records every value movement (today: informational
+//   IOUs from game results; later: deposits, payouts, rake).
+// - Game.feeBps is the house cut in basis points (0 now; flip on later).
+// - Settlement rows capture "who owes whom" so friends can settle off-app
+//   (Venmo/cash) and mark it done.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GameStatus {
+  LOBBY
+  IN_PROGRESS
+  COMPLETED
+}
+
+// Types of value movement. Only GAME_RESULT is used while money is off.
+enum LedgerType {
+  GAME_RESULT // net skins result for a player in a game (signed)
+  RAKE        // house cut (future)
+  DEPOSIT     // real money in via processor (future)
+  PAYOUT      // real money out to a user (future)
+  ADJUSTMENT  // manual correction
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String?  @unique
+  displayName  String?
+  passwordHash String?
+  isGuest      Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  memberships   GamePlayer[]
+  createdGames  Game[]               @relation("GameCreator")
+  ledgerEntries LedgerEntry[]
+  resetTokens   PasswordResetToken[]
+  owedBy        Settlement[]         @relation("SettlementCreditor")
+  owes          Settlement[]         @relation("SettlementDebtor")
+
+  @@index([email])
+}
+
+model Game {
+  id                String     @id @default(uuid())
+  code              String     @unique
+  name              String
+  stakePerHoleCents Int        @default(100) // e.g. 100 = $1.00 per hole
+  feeBps            Int        @default(0)    // house cut, basis points (0 = off)
+  numHoles          Int        @default(9)
+  status            GameStatus @default(LOBBY)
+  currentHole       Int        @default(1)
+
+  createdByUserId String
+  createdBy       User   @relation("GameCreator", fields: [createdByUserId], references: [id])
+
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  players       GamePlayer[]
+  holes         Hole[]
+  ledgerEntries LedgerEntry[]
+  settlements   Settlement[]
+
+  @@index([status])
+}
+
+// Join table: a user participating in a game.
+model GamePlayer {
+  id       String   @id @default(uuid())
+  gameId   String
+  userId   String
+  joinedAt DateTime @default(now())
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, userId])
+  @@index([userId])
+}
+
+model Hole {
+  id         String  @id @default(uuid())
+  gameId     String
+  holeNumber Int
+  par        Int     @default(3)
+
+  // Winner confirmation: a winner is proposed, then confirmed.
+  // requireConfirm = false (default) auto-confirms for trust-based friend games.
+  proposedWinnerId String?
+  winnerId         String?
+  confirmedById    String?
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, holeNumber])
+}
+
+// Every value movement. Today: GAME_RESULT only (informational IOU / lifetime net).
+model LedgerEntry {
+  id          String     @id @default(uuid())
+  userId      String
+  gameId      String?
+  amountCents Int        // signed: positive = won/owed-to-you, negative = lost/you-owe
+  type        LedgerType @default(GAME_RESULT)
+  note        String?
+  createdAt   DateTime   @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  game Game? @relation(fields: [gameId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([gameId])
+}
+
+// "X owes Y $Z" for a completed game. Friends settle off-app and mark settled.
+model Settlement {
+  id           String    @id @default(uuid())
+  gameId       String
+  fromUserId   String // debtor (owes)
+  toUserId     String // creditor (is owed)
+  amountCents  Int    // always positive
+  settled      Boolean   @default(false)
+  settledAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  from User @relation("SettlementDebtor", fields: [fromUserId], references: [id], onDelete: Cascade)
+  to   User @relation("SettlementCreditor", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@index([gameId])
+  @@index([fromUserId])
+  @@index([toUserId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Idempotency for Stripe webhooks (kept for the future money phase).
+model ProcessedStripeEvent {
+  id        String   @id // Stripe event id
+  createdAt DateTime @default(now())
+}

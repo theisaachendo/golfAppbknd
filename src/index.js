@@ -15,13 +15,18 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Real-money features are OFF until this flag is set. Keeps Stripe dormant.
+const MONEY_ENABLED = process.env.MONEY_ENABLED === 'true';
+
 app.use(cors());
 app.use(requestLogger);
 
-// Stripe webhooks require the raw body for signature verification.
-app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
-// Back-compat / common naming: accept Stripe dashboard destination using this path too.
-app.use('/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+if (MONEY_ENABLED) {
+  // Stripe webhooks require the raw body for signature verification.
+  app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+  // Back-compat / common naming: accept Stripe dashboard destination using this path too.
+  app.use('/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+}
 
 app.use(express.json());
 
@@ -32,7 +37,7 @@ app.get('/', (req, res) => {
 
 // Health check for free hosts (Render, Railway, etc.)
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'golf-app-api' });
+  res.json({ status: 'ok', service: 'golf-app-api', moneyEnabled: MONEY_ENABLED });
 });
 
 // Auth (no token required)
@@ -42,7 +47,9 @@ app.use('/auth', authRoutes);
 app.use('/api', optionalAuth);
 app.use('/api/games', gamesRoutes);
 app.use('/api/users', usersRoutes);
-app.use('/api/payments', paymentsRoutes);
+if (MONEY_ENABLED) {
+  app.use('/api/payments', paymentsRoutes);
+}
 
 async function start() {
   await initStore();
@@ -54,3 +61,12 @@ start().catch((err) => {
   console.error('Failed to start server:', err);
   process.exit(1);
 });
+
+// Graceful shutdown (Render sends SIGTERM on redeploy).
+import { prisma } from './lib/prisma.js';
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, async () => {
+    await prisma.$disconnect().catch(() => {});
+    process.exit(0);
+  });
+}

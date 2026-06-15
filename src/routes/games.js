@@ -6,11 +6,12 @@ import {
   addPlayerToGame,
   startGame,
   setHoleWinner,
+  proposeHoleWinner,
+  confirmHoleWinner,
   endGame,
   getLeaderboard,
   getResults,
-  getUserById,
-  updateUserBalance,
+  getSettlementsForGame,
 } from '../data/store.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -20,11 +21,15 @@ const router = Router();
 router.use(requireAuth);
 
 // POST /games — body: { name, stakePerHole }
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const { name, stakePerHole } = req.body || {};
-  const game = createGame({
-    name: name || 'Skins Game',
-    stakePerHole: stakePerHole ?? 1,
+  const stake = stakePerHole == null ? 1 : Number(stakePerHole);
+  if (!Number.isFinite(stake) || stake < 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'stakePerHole must be a non-negative number' });
+  }
+  const game = await createGame({
+    name: typeof name === 'string' && name.trim() ? name.trim() : 'Skins Game',
+    stakePerHole: stake,
     createdByUserId: req.user.id,
   });
   res.status(201).json({
@@ -37,16 +42,19 @@ router.post('/', (req, res) => {
 });
 
 // POST /games/join — body: { code }
-router.post('/join', (req, res) => {
+router.post('/join', async (req, res) => {
   const { code } = req.body || {};
   if (!code) {
     return res.status(400).json({ error: 'Bad request', message: 'code required' });
   }
-  const game = findGameByCode(code);
+  const game = await findGameByCode(code);
   if (!game) {
     return res.status(404).json({ error: 'Not found', message: 'Invalid game code' });
   }
-  const updated = addPlayerToGame(game.id, req.user.id);
+  if (game.status !== 'lobby') {
+    return res.status(400).json({ error: 'Bad request', message: 'This game has already started' });
+  }
+  const updated = await addPlayerToGame(game.id, req.user.id);
   if (!updated) {
     return res.status(400).json({ error: 'Bad request', message: 'Cannot join this game' });
   }
@@ -60,26 +68,22 @@ router.post('/join', (req, res) => {
 });
 
 // GET /games/:gameId — lobby or match state
-router.get('/:gameId', (req, res) => {
+router.get('/:gameId', async (req, res) => {
   const { gameId } = req.params;
-  const game = getGameById(gameId);
+  const game = await getGameById(gameId);
   if (!game) {
     return res.status(404).json({ error: 'Not found', message: 'Game not found' });
   }
   if (!game.playerIds.includes(req.user.id)) {
     return res.status(403).json({ error: 'Forbidden', message: 'Not a player in this game' });
   }
-  const players = game.playerIds.map((id) => {
-    const u = getUserById(id);
-    return { id: u?.id, displayName: u?.displayName || u?.email || 'Player' };
-  });
   const response = {
     id: game.id,
     code: game.code,
     name: game.name,
     stakePerHole: game.stakePerHole,
     status: game.status,
-    players,
+    players: game.players,
     currentHole: game.currentHole,
     holes: game.holes,
   };
@@ -90,16 +94,16 @@ router.get('/:gameId', (req, res) => {
 });
 
 // POST /games/:gameId/start
-router.post('/:gameId/start', (req, res) => {
+router.post('/:gameId/start', async (req, res) => {
   const { gameId } = req.params;
-  const game = getGameById(gameId);
+  const game = await getGameById(gameId);
   if (!game) {
     return res.status(404).json({ error: 'Not found', message: 'Game not found' });
   }
   if (!game.playerIds.includes(req.user.id)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
-  const updated = startGame(gameId);
+  const updated = await startGame(gameId);
   if (!updated) {
     return res.status(400).json({ error: 'Bad request', message: 'Game cannot be started' });
   }
@@ -111,23 +115,19 @@ router.post('/:gameId/start', (req, res) => {
   });
 });
 
-// PATCH /games/:gameId/holes/:holeNumber — body: { winnerId }
-// POST /games/:gameId/holes — body: { holeNumber, winnerId } (alternative)
-router.patch('/:gameId/holes/:holeNumber', (req, res) => {
-  const { gameId, holeNumber } = req.params;
-  const holeNum = parseInt(holeNumber, 10);
-  const { winnerId } = req.body || {};
+// Shared handler for recording a hole winner (direct, trust-based).
+async function handleSetWinner(req, res, gameId, holeNum, winnerId) {
   if (!winnerId || isNaN(holeNum)) {
     return res.status(400).json({ error: 'Bad request', message: 'winnerId and holeNumber required' });
   }
-  const game = getGameById(gameId);
+  const game = await getGameById(gameId);
   if (!game || !game.playerIds.includes(req.user.id)) {
     return res.status(404).json({ error: 'Not found' });
   }
   if (!game.playerIds.includes(winnerId)) {
     return res.status(400).json({ error: 'Bad request', message: 'winnerId must be a player' });
   }
-  const updated = setHoleWinner(gameId, holeNum, winnerId);
+  const updated = await setHoleWinner(gameId, holeNum, winnerId);
   if (!updated) {
     return res.status(400).json({ error: 'Bad request', message: 'Cannot set hole winner' });
   }
@@ -136,25 +136,59 @@ router.patch('/:gameId/holes/:holeNumber', (req, res) => {
     currentHole: updated.currentHole,
     leaderboard: getLeaderboard(updated),
   });
+}
+
+// PATCH /games/:gameId/holes/:holeNumber — body: { winnerId }
+router.patch('/:gameId/holes/:holeNumber', async (req, res) => {
+  const { gameId, holeNumber } = req.params;
+  await handleSetWinner(req, res, gameId, parseInt(holeNumber, 10), (req.body || {}).winnerId);
 });
 
-router.post('/:gameId/holes', (req, res) => {
+// POST /games/:gameId/holes — body: { holeNumber, winnerId } (alternative)
+router.post('/:gameId/holes', async (req, res) => {
   const { gameId } = req.params;
   const { holeNumber, winnerId } = req.body || {};
+  await handleSetWinner(req, res, gameId, parseInt(holeNumber, 10), winnerId);
+});
+
+// --- Optional two-step winner confirmation (for less trusting groups) ---
+
+// POST /games/:gameId/holes/:holeNumber/propose — body: { winnerId }
+router.post('/:gameId/holes/:holeNumber/propose', async (req, res) => {
+  const { gameId, holeNumber } = req.params;
   const holeNum = parseInt(holeNumber, 10);
+  const { winnerId } = req.body || {};
   if (!winnerId || isNaN(holeNum)) {
-    return res.status(400).json({ error: 'Bad request', message: 'holeNumber and winnerId required' });
+    return res.status(400).json({ error: 'Bad request', message: 'winnerId and holeNumber required' });
   }
-  const game = getGameById(gameId);
+  const game = await getGameById(gameId);
   if (!game || !game.playerIds.includes(req.user.id)) {
     return res.status(404).json({ error: 'Not found' });
   }
   if (!game.playerIds.includes(winnerId)) {
     return res.status(400).json({ error: 'Bad request', message: 'winnerId must be a player' });
   }
-  const updated = setHoleWinner(gameId, holeNum, winnerId);
+  const updated = await proposeHoleWinner(gameId, holeNum, winnerId);
   if (!updated) {
-    return res.status(400).json({ error: 'Bad request', message: 'Cannot set hole winner' });
+    return res.status(400).json({ error: 'Bad request', message: 'Cannot propose hole winner' });
+  }
+  res.json({ holes: updated.holes, currentHole: updated.currentHole });
+});
+
+// POST /games/:gameId/holes/:holeNumber/confirm
+router.post('/:gameId/holes/:holeNumber/confirm', async (req, res) => {
+  const { gameId, holeNumber } = req.params;
+  const holeNum = parseInt(holeNumber, 10);
+  if (isNaN(holeNum)) {
+    return res.status(400).json({ error: 'Bad request', message: 'holeNumber required' });
+  }
+  const game = await getGameById(gameId);
+  if (!game || !game.playerIds.includes(req.user.id)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const updated = await confirmHoleWinner(gameId, holeNum, req.user.id);
+  if (!updated) {
+    return res.status(400).json({ error: 'Bad request', message: 'Nothing to confirm for this hole' });
   }
   res.json({
     holes: updated.holes,
@@ -164,21 +198,16 @@ router.post('/:gameId/holes', (req, res) => {
 });
 
 // POST /games/:gameId/end
-router.post('/:gameId/end', (req, res) => {
+router.post('/:gameId/end', async (req, res) => {
   const { gameId } = req.params;
-  const game = getGameById(gameId);
+  const game = await getGameById(gameId);
   if (!game || !game.playerIds.includes(req.user.id)) {
     return res.status(404).json({ error: 'Not found' });
   }
-  const updated = endGame(gameId);
+  const updated = await endGame(gameId);
   if (!updated) {
     return res.status(400).json({ error: 'Bad request', message: 'Game cannot be ended' });
   }
-  // Apply payouts to user balances
-  const results = getResults(updated);
-  results.forEach((r) => {
-    if (r.payout !== 0) updateUserBalance(r.playerId, r.payout);
-  });
   res.json({
     id: updated.id,
     status: updated.status,
@@ -187,17 +216,29 @@ router.post('/:gameId/end', (req, res) => {
 });
 
 // GET /games/:gameId/results
-router.get('/:gameId/results', (req, res) => {
+router.get('/:gameId/results', async (req, res) => {
   const { gameId } = req.params;
-  const game = getGameById(gameId);
+  const game = await getGameById(gameId);
   if (!game) {
     return res.status(404).json({ error: 'Not found', message: 'Game not found' });
   }
   if (!game.playerIds.includes(req.user.id)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
-  const results = getResults(game);
-  res.json(results);
+  res.json(getResults(game));
+});
+
+// GET /games/:gameId/settlements — "who owes whom" for a completed game
+router.get('/:gameId/settlements', async (req, res) => {
+  const { gameId } = req.params;
+  const game = await getGameById(gameId);
+  if (!game) {
+    return res.status(404).json({ error: 'Not found', message: 'Game not found' });
+  }
+  if (!game.playerIds.includes(req.user.id)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  res.json(await getSettlementsForGame(gameId, req.user.id));
 });
 
 export default router;

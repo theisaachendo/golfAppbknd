@@ -1,34 +1,32 @@
 import { Router } from 'express';
 import {
-  getUserById,
   getGamesForUser,
   getActiveGameForUser,
   getLeaderboard,
-  updateUserBalance,
+  getBalance,
+  markSettlementSettled,
 } from '../data/store.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
+const MONEY_ENABLED = process.env.MONEY_ENABLED === 'true';
+
 router.use(requireAuth);
 
 // GET /users/me/active-game — current user's in-progress game (if any). For "return to game" after app restart.
-router.get('/me/active-game', (req, res) => {
-  const game = getActiveGameForUser(req.user.id);
+router.get('/me/active-game', async (req, res) => {
+  const game = await getActiveGameForUser(req.user.id);
   if (!game) {
     return res.json({ game: null });
   }
-  const players = game.playerIds.map((id) => {
-    const u = getUserById(id);
-    return { id: u?.id, displayName: u?.displayName || u?.email || 'Player' };
-  });
   const response = {
     id: game.id,
     code: game.code,
     name: game.name,
     stakePerHole: game.stakePerHole,
     status: game.status,
-    players,
+    players: game.players,
     currentHole: game.currentHole,
     holes: game.holes,
     leaderboard: getLeaderboard(game),
@@ -36,51 +34,39 @@ router.get('/me/active-game', (req, res) => {
   res.json({ game: response });
 });
 
-// GET /users/me — current user (optional, for profile display)
-router.get('/me', (req, res) => {
+// GET /users/me — current user (profile display)
+router.get('/me', async (req, res) => {
   const u = req.user;
+  const balance = await getBalance(u.id); // lifetime net standings (in dollars)
   res.json({
     id: u.id,
     displayName: u.displayName,
     email: u.email,
-    balance: u.balance ?? 0,
+    balance, // "net standings" while money is off; real balance once money is on
     isGuest: u.isGuest,
   });
 });
 
-// GET /users/me/balance
-router.get('/me/balance', (req, res) => {
-  res.json({ balance: req.user.balance ?? 0 });
+// GET /users/me/balance — lifetime net standings (sum of ledger entries)
+router.get('/me/balance', async (req, res) => {
+  res.json({ balance: await getBalance(req.user.id) });
 });
 
-// POST /users/me/deposit — body: { amount }
-// For testing / dev only. In production, credit balance only via Stripe (or other) webhook after real payment.
-router.post('/me/deposit', (req, res) => {
-  const amount = Number(req.body?.amount);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return res.status(400).json({ error: 'Bad request', message: 'Valid amount required' });
+// POST /users/me/settlements/:id/settle — mark a "who owes whom" line settled (off-app)
+// body: { settled?: boolean } (defaults to true)
+router.post('/me/settlements/:id/settle', async (req, res) => {
+  const { id } = req.params;
+  const settled = req.body?.settled === undefined ? true : !!req.body.settled;
+  const updated = await markSettlementSettled(id, req.user.id, settled);
+  if (!updated) {
+    return res.status(404).json({ error: 'Not found', message: 'Settlement not found or not yours' });
   }
-  updateUserBalance(req.user.id, amount);
-  res.json({ success: true, balance: req.user.balance ?? 0 });
-});
-
-// POST /users/me/withdraw — body: { amount }
-router.post('/me/withdraw', (req, res) => {
-  const amount = Number(req.body?.amount);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return res.status(400).json({ error: 'Bad request', message: 'Valid amount required' });
-  }
-  const balance = req.user.balance ?? 0;
-  if (amount > balance) {
-    return res.status(400).json({ error: 'Bad request', message: 'Insufficient balance' });
-  }
-  updateUserBalance(req.user.id, -amount);
-  res.json({ success: true, balance: req.user.balance });
+  res.json({ id: updated.id, settled: updated.settled, settledAt: updated.settledAt });
 });
 
 // GET /users/me/games — match history (past completed games)
-router.get('/me/games', (req, res) => {
-  const list = getGamesForUser(req.user.id);
+router.get('/me/games', async (req, res) => {
+  const list = await getGamesForUser(req.user.id);
   res.json(
     list.map((g) => ({
       id: g.id,
@@ -93,6 +79,25 @@ router.get('/me/games', (req, res) => {
       playerCount: g.playerCount,
     }))
   );
+});
+
+// --- Money features (disabled while MONEY_ENABLED=false) ---
+// Kept so the real-money phase is a flag flip + processor integration, not a rewrite.
+
+// POST /users/me/deposit — dev-only top-up (disabled when money is off)
+router.post('/me/deposit', (req, res) => {
+  if (!MONEY_ENABLED) {
+    return res.status(403).json({ error: 'Disabled', message: 'Money features are not enabled' });
+  }
+  return res.status(501).json({ error: 'Not implemented', message: 'Deposits go through the payment processor' });
+});
+
+// POST /users/me/withdraw — disabled when money is off
+router.post('/me/withdraw', (req, res) => {
+  if (!MONEY_ENABLED) {
+    return res.status(403).json({ error: 'Disabled', message: 'Money features are not enabled' });
+  }
+  return res.status(501).json({ error: 'Not implemented', message: 'Withdrawals go through the payment processor' });
 });
 
 export default router;

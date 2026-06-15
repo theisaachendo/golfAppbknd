@@ -18,7 +18,7 @@ export function verifyToken(token) {
 /**
  * Optional auth: sets req.user if valid Bearer token present; does not 401.
  */
-export function optionalAuth(req, res, next) {
+export async function optionalAuth(req, res, next) {
   const auth = req.headers.authorization;
   const token = auth && auth.startsWith('Bearer ') ? auth.slice(7) : null;
   if (!token) {
@@ -30,7 +30,12 @@ export function optionalAuth(req, res, next) {
     req.user = null;
     return next();
   }
-  req.user = getUserById(payload.userId) || null;
+  try {
+    req.user = (await getUserById(payload.userId)) || null;
+  } catch (err) {
+    console.error('optionalAuth lookup failed:', err);
+    req.user = null;
+  }
   next();
 }
 
