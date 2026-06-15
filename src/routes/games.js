@@ -5,9 +5,9 @@ import {
   getGameById,
   addPlayerToGame,
   startGame,
-  setHoleWinner,
-  proposeHoleWinner,
-  confirmHoleWinner,
+  setHoleResult,
+  acceptHoleChange,
+  rejectHoleChange,
   endGame,
   getLeaderboard,
   getResults,
@@ -20,9 +20,9 @@ const router = Router();
 // All game routes require auth
 router.use(requireAuth);
 
-// POST /games — body: { name, stakePerHole }
+// POST /games — body: { name, stakePerHole, numHoles? (9|18) }
 router.post('/', async (req, res) => {
-  const { name, stakePerHole } = req.body || {};
+  const { name, stakePerHole, numHoles } = req.body || {};
   const stake = stakePerHole == null ? 1 : Number(stakePerHole);
   if (!Number.isFinite(stake) || stake < 0) {
     return res.status(400).json({ error: 'Bad request', message: 'stakePerHole must be a non-negative number' });
@@ -30,6 +30,7 @@ router.post('/', async (req, res) => {
   const game = await createGame({
     name: typeof name === 'string' && name.trim() ? name.trim() : 'Skins Game',
     stakePerHole: stake,
+    numHoles: Number(numHoles) === 9 ? 9 : 18,
     createdByUserId: req.user.id,
   });
   res.status(201).json({
@@ -37,6 +38,7 @@ router.post('/', async (req, res) => {
     code: game.code,
     name: game.name,
     stakePerHole: game.stakePerHole,
+    numHoles: game.numHoles,
     status: game.status,
   });
 });
@@ -82,6 +84,7 @@ router.get('/:gameId', async (req, res) => {
     code: game.code,
     name: game.name,
     stakePerHole: game.stakePerHole,
+    numHoles: game.numHoles,
     status: game.status,
     players: game.players,
     currentHole: game.currentHole,
@@ -115,70 +118,32 @@ router.post('/:gameId/start', async (req, res) => {
   });
 });
 
-// Shared handler for recording a hole winner (direct, trust-based).
-async function handleSetWinner(req, res, gameId, holeNum, winnerId) {
-  if (!winnerId || isNaN(holeNum)) {
-    return res.status(400).json({ error: 'Bad request', message: 'winnerId and holeNumber required' });
+const ERROR_STATUS = {
+  not_in_progress: [400, 'Game is not in progress'],
+  no_hole: [404, 'Hole not found'],
+  bad_winner: [400, 'winnerId must be a player in this game'],
+  no_result: [400, 'Provide a winnerId or set tied=true'],
+  no_pending: [400, 'No pending change for this hole'],
+  cannot_accept_own: [403, 'Another player must accept your change'],
+  no_game: [404, 'Game not found'],
+};
+
+function sendResult(res, result) {
+  if (result.error) {
+    const [code, message] = ERROR_STATUS[result.error] || [400, 'Bad request'];
+    return res.status(code).json({ error: 'Bad request', message });
   }
-  const game = await getGameById(gameId);
-  if (!game || !game.playerIds.includes(req.user.id)) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  if (!game.playerIds.includes(winnerId)) {
-    return res.status(400).json({ error: 'Bad request', message: 'winnerId must be a player' });
-  }
-  const updated = await setHoleWinner(gameId, holeNum, winnerId);
-  if (!updated) {
-    return res.status(400).json({ error: 'Bad request', message: 'Cannot set hole winner' });
-  }
+  const g = result.game;
   res.json({
-    holes: updated.holes,
-    currentHole: updated.currentHole,
-    leaderboard: getLeaderboard(updated),
+    status: result.status, // 'applied' | 'pending' | 'noop'
+    holes: g.holes,
+    currentHole: g.currentHole,
+    leaderboard: getLeaderboard(g),
   });
 }
 
-// PATCH /games/:gameId/holes/:holeNumber — body: { winnerId }
-router.patch('/:gameId/holes/:holeNumber', async (req, res) => {
-  const { gameId, holeNumber } = req.params;
-  await handleSetWinner(req, res, gameId, parseInt(holeNumber, 10), (req.body || {}).winnerId);
-});
-
-// POST /games/:gameId/holes — body: { holeNumber, winnerId } (alternative)
-router.post('/:gameId/holes', async (req, res) => {
-  const { gameId } = req.params;
-  const { holeNumber, winnerId } = req.body || {};
-  await handleSetWinner(req, res, gameId, parseInt(holeNumber, 10), winnerId);
-});
-
-// --- Optional two-step winner confirmation (for less trusting groups) ---
-
-// POST /games/:gameId/holes/:holeNumber/propose — body: { winnerId }
-router.post('/:gameId/holes/:holeNumber/propose', async (req, res) => {
-  const { gameId, holeNumber } = req.params;
-  const holeNum = parseInt(holeNumber, 10);
-  const { winnerId } = req.body || {};
-  if (!winnerId || isNaN(holeNum)) {
-    return res.status(400).json({ error: 'Bad request', message: 'winnerId and holeNumber required' });
-  }
-  const game = await getGameById(gameId);
-  if (!game || !game.playerIds.includes(req.user.id)) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  if (!game.playerIds.includes(winnerId)) {
-    return res.status(400).json({ error: 'Bad request', message: 'winnerId must be a player' });
-  }
-  const updated = await proposeHoleWinner(gameId, holeNum, winnerId);
-  if (!updated) {
-    return res.status(400).json({ error: 'Bad request', message: 'Cannot propose hole winner' });
-  }
-  res.json({ holes: updated.holes, currentHole: updated.currentHole });
-});
-
-// POST /games/:gameId/holes/:holeNumber/confirm
-router.post('/:gameId/holes/:holeNumber/confirm', async (req, res) => {
-  const { gameId, holeNumber } = req.params;
-  const holeNum = parseInt(holeNumber, 10);
+// Shared: set a hole result — winner outright or a tie (carryover).
+async function handleSetResult(req, res, gameId, holeNum, body) {
   if (isNaN(holeNum)) {
     return res.status(400).json({ error: 'Bad request', message: 'holeNumber required' });
   }
@@ -186,15 +151,44 @@ router.post('/:gameId/holes/:holeNumber/confirm', async (req, res) => {
   if (!game || !game.playerIds.includes(req.user.id)) {
     return res.status(404).json({ error: 'Not found' });
   }
-  const updated = await confirmHoleWinner(gameId, holeNum, req.user.id);
-  if (!updated) {
-    return res.status(400).json({ error: 'Bad request', message: 'Nothing to confirm for this hole' });
+  const tied = body?.tied === true;
+  const winnerId = tied ? null : body?.winnerId;
+  const result = await setHoleResult(gameId, holeNum, { winnerId, tied }, req.user.id);
+  sendResult(res, result);
+}
+
+// PATCH /games/:gameId/holes/:holeNumber — body: { winnerId } | { tied: true }
+router.patch('/:gameId/holes/:holeNumber', async (req, res) => {
+  const { gameId, holeNumber } = req.params;
+  await handleSetResult(req, res, gameId, parseInt(holeNumber, 10), req.body || {});
+});
+
+// POST /games/:gameId/holes — body: { holeNumber, winnerId } | { holeNumber, tied: true }
+router.post('/:gameId/holes', async (req, res) => {
+  const { gameId } = req.params;
+  await handleSetResult(req, res, gameId, parseInt((req.body || {}).holeNumber, 10), req.body || {});
+});
+
+// POST /games/:gameId/holes/:holeNumber/accept — approve a pending change (other player)
+router.post('/:gameId/holes/:holeNumber/accept', async (req, res) => {
+  const { gameId, holeNumber } = req.params;
+  const game = await getGameById(gameId);
+  if (!game || !game.playerIds.includes(req.user.id)) {
+    return res.status(404).json({ error: 'Not found' });
   }
-  res.json({
-    holes: updated.holes,
-    currentHole: updated.currentHole,
-    leaderboard: getLeaderboard(updated),
-  });
+  const result = await acceptHoleChange(gameId, parseInt(holeNumber, 10), req.user.id);
+  sendResult(res, result);
+});
+
+// POST /games/:gameId/holes/:holeNumber/reject — reject/cancel a pending change
+router.post('/:gameId/holes/:holeNumber/reject', async (req, res) => {
+  const { gameId, holeNumber } = req.params;
+  const game = await getGameById(gameId);
+  if (!game || !game.playerIds.includes(req.user.id)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const result = await rejectHoleChange(gameId, parseInt(holeNumber, 10));
+  sendResult(res, result);
 });
 
 // POST /games/:gameId/end

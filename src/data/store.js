@@ -14,8 +14,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma.js';
 import { hashPassword } from '../lib/password.js';
 
-const DEFAULT_HOLES = 9;
-const DEFAULT_PAR = 3;
+const DEFAULT_HOLES = 18;
+// Standard par-36 nine; an 18-hole round repeats it for par 72.
+const FRONT_9_PARS = [4, 4, 3, 5, 4, 4, 3, 4, 5];
+const parForHole = (holeNumber) => FRONT_9_PARS[(holeNumber - 1) % 9];
 
 // ----- Helpers -----
 function generateGameCode() {
@@ -44,7 +46,11 @@ function toGameShape(g) {
     holeNumber: h.holeNumber,
     par: h.par,
     winnerId: h.winnerId,
-    proposedWinnerId: h.proposedWinnerId,
+    tied: h.tied,
+    // Pending change awaiting another player's approval (null if none).
+    pending: h.pendingById
+      ? { byId: h.pendingById, winnerId: h.pendingWinnerId, tied: h.pendingTied }
+      : null,
   }));
   return {
     id: g.id,
@@ -139,20 +145,21 @@ export async function createGame({ name, stakePerHole, createdByUserId, numHoles
   while (await prisma.game.findUnique({ where: { code } })) code = generateGameCode();
 
   const stakePerHoleCents = Math.max(0, Math.round((Number(stakePerHole) || 1) * 100));
+  const holes = Number(numHoles) === 9 ? 9 : 18; // only 9 or 18 supported
 
   const game = await prisma.game.create({
     data: {
       code,
       name: name || 'Skins Game',
       stakePerHoleCents,
-      numHoles,
+      numHoles: holes,
       currentHole: 1,
       createdByUserId,
       players: { create: [{ userId: createdByUserId }] },
       holes: {
-        create: Array.from({ length: numHoles }, (_, i) => ({
+        create: Array.from({ length: holes }, (_, i) => ({
           holeNumber: i + 1,
-          par: DEFAULT_PAR,
+          par: parForHole(i + 1),
         })),
       },
     },
@@ -194,50 +201,78 @@ export async function startGame(gameId) {
   return toGameShape(updated);
 }
 
-// Direct (trust-based) winner set: records and confirms in one step.
-export async function setHoleWinner(gameId, holeNumber, winnerId) {
+// Set a hole result: winner outright, or a tie (skin carries over).
+// - First time a hole is decided -> applied directly (trust-based first entry).
+// - Changing an ALREADY-decided hole -> creates a pending change that another
+//   player must accept before it takes effect.
+// Returns { status: 'applied' | 'pending' | 'noop', game } or { error }.
+export async function setHoleResult(gameId, holeNumber, { winnerId = null, tied = false }, byUserId) {
   const game = await prisma.game.findUnique({ where: { id: gameId }, include: gameInclude });
-  if (!game || game.status !== 'IN_PROGRESS') return null;
+  if (!game || game.status !== 'IN_PROGRESS') return { error: 'not_in_progress' };
   const hole = game.holes.find((h) => h.holeNumber === holeNumber);
-  if (!hole) return null;
+  if (!hole) return { error: 'no_hole' };
+  if (!tied && winnerId && !game.players.some((p) => p.userId === winnerId)) {
+    return { error: 'bad_winner' };
+  }
+  if (!tied && !winnerId) return { error: 'no_result' };
 
+  const isDecided = hole.winnerId != null || hole.tied;
+  const sameAsCurrent = tied ? hole.tied : hole.winnerId === winnerId;
+
+  if (!isDecided) {
+    // Initial entry — apply immediately and advance to the next hole.
+    await prisma.hole.update({
+      where: { gameId_holeNumber: { gameId, holeNumber } },
+      data: { winnerId: tied ? null : winnerId, tied, pendingById: null, pendingWinnerId: null, pendingTied: false },
+    });
+    if (holeNumber < game.holes.length) {
+      await prisma.game.update({ where: { id: gameId }, data: { currentHole: holeNumber + 1 } });
+    }
+    return { status: 'applied', game: await getGameById(gameId) };
+  }
+
+  if (sameAsCurrent && !hole.pendingById) {
+    return { status: 'noop', game: toGameShape(game) };
+  }
+
+  // Decided + different -> queue a change for another player to approve.
   await prisma.hole.update({
     where: { gameId_holeNumber: { gameId, holeNumber } },
-    data: { winnerId, proposedWinnerId: winnerId },
+    data: { pendingWinnerId: tied ? null : winnerId, pendingTied: tied, pendingById: byUserId },
   });
-  if (holeNumber < game.holes.length) {
-    await prisma.game.update({ where: { id: gameId }, data: { currentHole: holeNumber + 1 } });
-  }
-  const updated = await prisma.game.findUnique({ where: { id: gameId }, include: gameInclude });
-  return toGameShape(updated);
+  return { status: 'pending', game: await getGameById(gameId) };
 }
 
-// Two-step confirmation (optional, for less trusting groups).
-export async function proposeHoleWinner(gameId, holeNumber, winnerId) {
-  const game = await prisma.game.findUnique({ where: { id: gameId } });
-  if (!game || game.status !== 'IN_PROGRESS') return null;
+// Accept a pending change to a hole (must be a different player than the proposer).
+export async function acceptHoleChange(gameId, holeNumber, byUserId) {
+  const game = await prisma.game.findUnique({ where: { id: gameId }, include: gameInclude });
+  if (!game) return { error: 'no_game' };
+  const hole = game.holes.find((h) => h.holeNumber === holeNumber);
+  if (!hole || !hole.pendingById) return { error: 'no_pending' };
+  if (hole.pendingById === byUserId) return { error: 'cannot_accept_own' };
   await prisma.hole.update({
     where: { gameId_holeNumber: { gameId, holeNumber } },
-    data: { proposedWinnerId: winnerId, winnerId: null },
+    data: {
+      winnerId: hole.pendingTied ? null : hole.pendingWinnerId,
+      tied: hole.pendingTied,
+      pendingById: null,
+      pendingWinnerId: null,
+      pendingTied: false,
+    },
   });
-  const updated = await prisma.game.findUnique({ where: { id: gameId }, include: gameInclude });
-  return toGameShape(updated);
+  return { status: 'applied', game: await getGameById(gameId) };
 }
 
-export async function confirmHoleWinner(gameId, holeNumber, confirmedById) {
+// Reject (or cancel) a pending change. Any player in the game may reject.
+export async function rejectHoleChange(gameId, holeNumber) {
   const game = await prisma.game.findUnique({ where: { id: gameId }, include: gameInclude });
-  if (!game || game.status !== 'IN_PROGRESS') return null;
-  const hole = game.holes.find((h) => h.holeNumber === holeNumber);
-  if (!hole || !hole.proposedWinnerId) return null;
+  const hole = game?.holes.find((h) => h.holeNumber === holeNumber);
+  if (!hole || !hole.pendingById) return { error: 'no_pending' };
   await prisma.hole.update({
     where: { gameId_holeNumber: { gameId, holeNumber } },
-    data: { winnerId: hole.proposedWinnerId, confirmedById },
+    data: { pendingById: null, pendingWinnerId: null, pendingTied: false },
   });
-  if (holeNumber < game.holes.length) {
-    await prisma.game.update({ where: { id: gameId }, data: { currentHole: holeNumber + 1 } });
-  }
-  const updated = await prisma.game.findUnique({ where: { id: gameId }, include: gameInclude });
-  return toGameShape(updated);
+  return { status: 'applied', game: await getGameById(gameId) };
 }
 
 // End the game: write GAME_RESULT ledger entries + Settlement rows in one transaction.
@@ -285,7 +320,9 @@ export async function endGame(gameId) {
 }
 
 // ----- Leaderboard / results (pure, derived from a normalized game) -----
-// Skins: each hole winner wins stakePerHole from each other player.
+// Skins with carryover: a tied hole's skin carries to the next hole, so the next
+// outright winner takes (1 + carried) skins. Each skin is worth `stakePerHole`
+// from every other player. Undecided holes are simply skipped.
 export function getLeaderboard(game) {
   const { holes, players, stakePerHoleCents } = game;
   const ids = players.map((p) => p.id);
@@ -295,16 +332,29 @@ export function getLeaderboard(game) {
     skins[id] = 0;
     cents[id] = 0;
   });
-  holes.forEach((h) => {
-    if (h.winnerId && cents[h.winnerId] !== undefined) {
-      skins[h.winnerId] += 1;
-      const n = ids.length;
-      cents[h.winnerId] += stakePerHoleCents * (n - 1);
-      ids.filter((i) => i !== h.winnerId).forEach((i) => {
-        cents[i] -= stakePerHoleCents;
-      });
+
+  const n = ids.length;
+  let carry = 0;
+  // holes arrive sorted by holeNumber (gameInclude orderBy)
+  for (const h of holes) {
+    if (h.tied) {
+      carry += 1; // skin rolls to the next hole
+      continue;
     }
-  });
+    if (h.winnerId && cents[h.winnerId] !== undefined) {
+      const value = 1 + carry; // skins won on this hole
+      skins[h.winnerId] += value;
+      cents[h.winnerId] += stakePerHoleCents * value * (n - 1);
+      ids
+        .filter((i) => i !== h.winnerId)
+        .forEach((i) => {
+          cents[i] -= stakePerHoleCents * value;
+        });
+      carry = 0;
+    }
+    // undecided hole: no effect, carry unchanged
+  }
+
   return players.map((p) => ({
     playerId: p.id,
     name: p.displayName,

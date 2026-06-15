@@ -57,7 +57,7 @@ model Game {
   name              String
   stakePerHoleCents Int        @default(100) // e.g. 100 = $1.00 per hole
   feeBps            Int        @default(0)    // house cut, basis points (0 = off)
-  numHoles          Int        @default(9)
+  numHoles          Int        @default(18)
   status            GameStatus @default(LOBBY)
   currentHole       Int        @default(1)
 
@@ -94,13 +94,18 @@ model Hole {
   id         String  @id @default(uuid())
   gameId     String
   holeNumber Int
-  par        Int     @default(3)
+  par        Int     @default(4)
 
-  // Winner confirmation: a winner is proposed, then confirmed.
-  // requireConfirm = false (default) auto-confirms for trust-based friend games.
-  proposedWinnerId String?
-  winnerId         String?
-  confirmedById    String?
+  // Accepted result: winnerId set => won outright; tied => halved (skin carries).
+  // Neither => not yet played.
+  winnerId String?
+  tied     Boolean @default(false)
+
+  // Pending change to an ALREADY-decided hole, awaiting another player's approval.
+  // A change is pending when pendingById is set.
+  pendingWinnerId String?
+  pendingTied     Boolean @default(false)
+  pendingById     String?
 
   game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
