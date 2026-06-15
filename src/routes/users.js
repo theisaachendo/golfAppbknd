@@ -5,6 +5,7 @@ import {
   getLeaderboard,
   getBalance,
   markSettlementSettled,
+  updateUserDisplayName,
 } from '../data/store.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -47,6 +48,22 @@ router.get('/me', async (req, res) => {
   });
 });
 
+// PATCH /users/me — update profile (currently just displayName; works for guests too)
+router.patch('/me', async (req, res) => {
+  const raw = req.body?.displayName;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return res.status(400).json({ error: 'Bad request', message: 'displayName required' });
+  }
+  const displayName = raw.trim().slice(0, 40);
+  const updated = await updateUserDisplayName(req.user.id, displayName);
+  res.json({
+    id: updated.id,
+    displayName: updated.displayName,
+    email: updated.email,
+    isGuest: updated.isGuest,
+  });
+});
+
 // GET /users/me/balance — lifetime net standings (sum of ledger entries)
 router.get('/me/balance', async (req, res) => {
   res.json({ balance: await getBalance(req.user.id) });
@@ -64,8 +81,12 @@ router.post('/me/settlements/:id/settle', async (req, res) => {
   res.json({ id: updated.id, settled: updated.settled, settledAt: updated.settledAt });
 });
 
-// GET /users/me/games — match history (past completed games)
+// GET /users/me/games — match history (past completed games).
+// Match history is a signed-up feature; guests don't get persistent history.
 router.get('/me/games', async (req, res) => {
+  if (req.user.isGuest) {
+    return res.json([]);
+  }
   const list = await getGamesForUser(req.user.id);
   res.json(
     list.map((g) => ({

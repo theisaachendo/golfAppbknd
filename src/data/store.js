@@ -111,8 +111,12 @@ export async function updateUserPassword(userId, passwordHash) {
   return prisma.user.update({ where: { id: userId }, data: { passwordHash } });
 }
 
+export async function updateUserDisplayName(userId, displayName) {
+  return prisma.user.update({ where: { id: userId }, data: { displayName } });
+}
+
 // ----- Password reset tokens -----
-export async function createPasswordResetToken(userId, ttlMs = 1000 * 60 * 30) {
+export async function createPasswordResetToken(userId, ttlMs = 1000 * 60 * 60) {
   const token = uuidv4();
   const expiresAt = new Date(Date.now() + ttlMs);
   await prisma.passwordResetToken.create({ data: { token, userId, expiresAt } });
