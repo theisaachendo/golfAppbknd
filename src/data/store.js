@@ -121,6 +121,13 @@ export async function updateUserDisplayName(userId, displayName) {
   return prisma.user.update({ where: { id: userId }, data: { displayName } });
 }
 
+// Delete a user and their personal data. Memberships, ledger entries,
+// settlements, and reset tokens cascade-delete; games they created are kept
+// for other players (creator is set null).
+export async function deleteUser(userId) {
+  await prisma.user.delete({ where: { id: userId } });
+}
+
 // ----- Password reset tokens -----
 export async function createPasswordResetToken(userId, ttlMs = 1000 * 60 * 60) {
   const token = uuidv4();

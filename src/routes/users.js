@@ -6,6 +6,7 @@ import {
   getBalance,
   markSettlementSettled,
   updateUserDisplayName,
+  deleteUser,
 } from '../data/store.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -62,6 +63,17 @@ router.patch('/me', async (req, res) => {
     email: updated.email,
     isGuest: updated.isGuest,
   });
+});
+
+// DELETE /users/me — permanently delete the account and personal data (App Store requirement)
+router.delete('/me', async (req, res) => {
+  try {
+    await deleteUser(req.user.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete account error:', err);
+    res.status(500).json({ error: 'Internal error', message: 'Could not delete account' });
+  }
 });
 
 // GET /users/me/balance — lifetime net standings (sum of ledger entries)

@@ -61,8 +61,10 @@ model Game {
   status            GameStatus @default(LOBBY)
   currentHole       Int        @default(1)
 
-  createdByUserId String
-  createdBy       User   @relation("GameCreator", fields: [createdByUserId], references: [id])
+  // Optional so a user can delete their account without wiping games other
+  // players still have in their history (creator is nulled, game preserved).
+  createdByUserId String?
+  createdBy       User?   @relation("GameCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
 
   createdAt   DateTime  @default(now())
   startedAt   DateTime?
