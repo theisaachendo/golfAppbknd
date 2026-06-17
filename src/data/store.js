@@ -452,7 +452,7 @@ export async function getBalance(userId) {
   return (agg._sum.amountCents || 0) / 100;
 }
 
-// Used by the (future, flag-gated) Stripe webhook to credit a deposit.
+// General ledger adjustment helper (kept for a future money phase).
 export async function updateUserBalance(userId, amountDollars, type = 'ADJUSTMENT', gameId = null) {
   const amountCents = Math.round(Number(amountDollars) * 100);
   if (!Number.isFinite(amountCents) || amountCents === 0) return;
@@ -491,14 +491,4 @@ export async function getGamesForUser(userId) {
       payout: mine?.payout ?? 0,
     };
   });
-}
-
-// ----- Stripe webhook idempotency (kept for the money phase) -----
-export async function hasProcessedStripeEvent(eventId) {
-  const row = await prisma.processedStripeEvent.findUnique({ where: { id: eventId } });
-  return !!row;
-}
-
-export async function markStripeEventProcessed(eventId) {
-  await prisma.processedStripeEvent.create({ data: { id: eventId } }).catch(() => {});
 }

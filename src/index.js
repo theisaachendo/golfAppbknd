@@ -7,27 +7,18 @@ import { initStore } from './data/store.js';
 import authRoutes from './routes/auth.js';
 import gamesRoutes from './routes/games.js';
 import usersRoutes from './routes/users.js';
-import paymentsRoutes from './routes/payments.js';
-import stripeWebhookRoutes from './routes/stripeWebhook.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Real-money features are OFF until this flag is set. Keeps Stripe dormant.
+// Real-money features are OFF. The app is a scorekeeper / settle-up tracker;
+// friends settle off-app. This flag only affects what /health reports.
 const MONEY_ENABLED = process.env.MONEY_ENABLED === 'true';
 
 app.use(cors());
 app.use(requestLogger);
-
-if (MONEY_ENABLED) {
-  // Stripe webhooks require the raw body for signature verification.
-  app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
-  // Back-compat / common naming: accept Stripe dashboard destination using this path too.
-  app.use('/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
-}
-
 app.use(express.json());
 
 // Root: so frontend can hit base URL and get a 200
@@ -47,9 +38,6 @@ app.use('/auth', authRoutes);
 app.use('/api', optionalAuth);
 app.use('/api/games', gamesRoutes);
 app.use('/api/users', usersRoutes);
-if (MONEY_ENABLED) {
-  app.use('/api/payments', paymentsRoutes);
-}
 
 async function start() {
   await initStore();
