@@ -3,7 +3,11 @@ import { getUserById } from '../data/store.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
 
-export function signToken(payload, expiresIn = '7d') {
+// Long-lived sessions: a casual scorekeeping app shouldn't log players out
+// mid-round. 90 days by default; override with JWT_EXPIRES_IN (e.g. '30d').
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '90d';
+
+export function signToken(payload, expiresIn = JWT_EXPIRES_IN) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn });
 }
 
